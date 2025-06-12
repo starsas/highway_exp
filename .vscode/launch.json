@@ -10,7 +10,7 @@
             "request": "launch",
             "program": "${file}",
             "console": "integratedTerminal",
-            "python": "C://Users//zhumi//.conda//envs//HighwayEnv//python.exe"
+            "python": "/home/crr/.conda/envs/HighwayEnv/bin/python"
         }
     ]
 }
