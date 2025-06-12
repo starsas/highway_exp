@@ -1,0 +1,10 @@
+创建conda环境
+conda create -n HighwayEnv python=3.7.1
+进入conda环境
+conda activate HighwayEnv
+
+安装实验所需包
+pip install -r requirements.txt
+
+
+注意，如果使用vscode调试代码，若vscode中python debugger扩展包为最新版，无法调试python版本低于3.9的代码，因此需要降低python debugger版本 
