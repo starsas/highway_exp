@@ -1,5 +1,12 @@
 # highway_exp
 
+env
+- 原HighWayEnv 基础上，装openai
+
+    pip install -i https://pypi.tuna.tsinghua.edu.cn/simple openai
+
+
+
 exp1
 - main3.py是主函数
 - two_llm.py是llm函数页面
