@@ -14,7 +14,15 @@ MAIN_LANE_INDICES = [0, 1]
 RAMP_LANE_IDX = 2 # The ramp is now explicitly lane 2
 MERGE_MAIN_LANE_IDX = 1 # Main lane involved in merge is lane 1 (rightmost main lane)
 MERGE_RAMP_LANE_IDX = 2 # Ramp lane involved in merge is lane 2
+NUM_TOTAL_LANES = 3
 
+# --- Trajectory Prediction Constants ---
+PREDICTION_TIMESTEP = 0.5
+PREDICTION_HORIZON = 2.0
+SAFE_COLLISION_DISTANCE = 12.0 # Updated to 10m for safer prediction
+
+# --- Constant for Nearby Vehicle Filtering ---
+NEARBY_OBSERVATION_DISTANCE = 30.0
 # ==============================================================================
 # 1. LLM Tools related definitions and classes
 # ==============================================================================
@@ -101,11 +109,7 @@ ACTIONS_DESCRIPTION = {
     4: 'decelerate the vehicle'
 }
 
-# --- Trajectory Prediction Constants ---
-PREDICTION_TIMESTEP = 0.5
-PREDICTION_HORIZON = 3.0
-SAFE_COLLISION_DISTANCE = 15.0 # Updated to 10m for safer prediction
-NEARBY_OBSERVATION_DISTANCE=30
+
 
 
 def _predict_single_vehicle_trajectory(vehicle: 'MockVehicle', action: Optional[str], env_road: Road, env_dt: float) -> List[np.ndarray]:
@@ -192,7 +196,7 @@ class getAvailableLanes:
         if ego_vehicle_obj is None:
             return f"Vehicle with ID '{vid}' not found."
         current_lane_idx = ego_vehicle_obj.lane_idx
-        available_lanes_info = [f"`lane_{current_lane_idx}` is the current lane.`"] # Added backtick, changed to current lane.
+        available_lanes_info = [f"`lane_{current_lane_idx}` is the current lane.`"] 
         
         current_lane_tuple = ego_vehicle_obj.lane_id_tuple
         side_lane_tuples = self.env.road.network.side_lanes(current_lane_tuple)
@@ -200,16 +204,13 @@ class getAvailableLanes:
         for side_lane_tuple in side_lane_tuples:
             side_idx = side_lane_tuple[2]
             if side_idx < current_lane_idx: # It's a left lane
-                # If current is ramp, and trying to change left to main lane 1
                 if current_lane_idx == RAMP_LANE_IDX and side_idx == MERGE_MAIN_LANE_IDX and not is_in_merging_area(ego_vehicle_obj):
                      available_lanes_info.append(f"Cannot change to `lane_{MERGE_MAIN_LANE_IDX}` from current lane `lane_{RAMP_LANE_IDX}` as vehicle is not in merging area.")
-                # If current is main lane 1, and trying to change left to main lane 0
-                elif current_lane_idx == MERGE_MAIN_LANE_IDX and side_idx == MAIN_LANE_INDICES[0]:
+                elif current_lane_idx == MERGE_MAIN_LANE_IDX and side_idx == MAIN_LANE_INDICES[0]: # Main lane 1 to main lane 0
                      available_lanes_info.append(f"`lane_{side_idx}` is to the left of the current lane.")
                 else: # Generic left lane
                     available_lanes_info.append(f"`lane_{side_idx}` is to the left of the current lane.")
             elif side_idx > current_lane_idx: # It's a right lane
-                # If current is main lane 1, and trying to change right to ramp lane 2
                 if current_lane_idx == MERGE_MAIN_LANE_IDX and side_idx == RAMP_LANE_IDX and not is_in_merging_area(ego_vehicle_obj):
                     available_lanes_info.append(f"Cannot change to `lane_{RAMP_LANE_IDX}` from current lane `lane_{MERGE_MAIN_LANE_IDX}` as vehicle is not in merging area.")
                 else: # Generic right lane
@@ -429,18 +430,18 @@ class LLMAgent:
             * **Crucially, call `Get_All_Nearby_Vehicles_Info(input='ego')` to get a comprehensive overview of surrounding vehicles in all relevant lanes (current, left, right).** This tool's output will provide a structured JSON with 'current_lane', 'left_lane', 'right_lane' sections, each listing 'front' and 'rear' vehicles. For each vehicle, it will include its 'id', 'type' (CAV/HDV), 'speed', 'distance_from_ego', 'lane_id', and importantly, `current_decision_of_CAV` (if that CAV has already been processed in this step's priority queue), indicating their planned action in this step.
             * **After analyzing `Get_All_Nearby_Vehicles_Info`'s output:**
                 * **Identify all unique relevant vehicle IDs** from ALL parts of the output (current lane, left lane, right lane - front and rear). These are the vehicles you must check for conflicts.
-                * **Prioritize ego actions to evaluate based on your current situation and merging strategy:**
+                * **Prioritize ego actions to evaluate based on your current status and merging strategy:**
                     * **General Rule on Frequent Lane Changes:** Do NOT change lanes frequently unless explicitly justified by the merging strategy or a critical safety need. This means `IDLE` or `FASTER` (to maintain speed) are often higher priority in non-critical situations.
-                    * **Acceleration Rule:** Unless you are the lead vehicle on a main lane (and there's a ramp vehicle behind you, not in front), try to avoid accelerating. Focus on maintaining current speed (IDLE).
+                    * **Acceleration Rule:** Unless you are the very first vehicle on a main lane (no front vehicle in your lane) AND there is a ramp vehicle in your right-rear side lane that needs to merge, try to avoid accelerating. Focus on maintaining current speed (IDLE).
                     * **Prioritization by Vehicle Role/Location:**
-                        * If you are a **Ramp Vehicle (lane {RAMP_LANE_IDX}) AND in the merging zone**: Prioritize `LANE_LEFT` (if available and safe, as per merging strategy). Then consider `FASTER`, `IDLE`, `SLOWER`.
-                        * If you are a **Ramp Vehicle (lane {RAMP_LANE_IDX}) AND NOT in the merging zone (e.g., in "a","b" or "b","c" segments)**: You CANNOT change lanes. Your only available actions are `FASTER`, `IDLE`, `SLOWER`. Prioritize `IDLE` or `FASTER` to reach merging zone efficiently.
-                        * If you are a **Main Road Vehicle (lane {MERGE_MAIN_LANE_IDX}) AND in the merging zone**: Prioritize `IDLE` or `FASTER`. Consider `LANE_LEFT` for yielding if a ramp vehicle needs to merge and it's safe. Then `SLOWER`.
+                        * If you are a **Ramp Vehicle (lane {RAMP_LANE_IDX}) AND in the merging zone (segment "c","d")**: Prioritize `LANE_LEFT` (if available and safe, as per merging strategy). Then consider `IDLE`, `SLOWER`. **You CANNOT accelerate.**
+                        * If you are a **Ramp Vehicle (lane {RAMP_LANE_IDX}) AND NOT in the merging zone (e.g., in "a","b" or "b","c" segments)**: You CANNOT change lanes. Your only available actions are `IDLE`, `SLOWER`. **You CANNOT accelerate.** Prioritize `IDLE`.
+                        * If you are a **Main Road Vehicle (lane {MERGE_MAIN_LANE_IDX}) AND in the merging zone (segment "c","d")**: Prioritize `IDLE` or `FASTER` (if no front vehicle). **If a ramp vehicle needs to merge from your right, prioritize `LANE_LEFT` (if safe and available) to yield.** Then `SLOWER`.
                         * If you are a **Main Road Vehicle (lane {MAIN_LANE_INDICES[0]}) or not in the merging zone**: Prioritize `IDLE` or `FASTER` to maintain efficiency. Then `LANE_LEFT`, `LANE_RIGHT`, `SLOWER`.
                 * **For each prioritized ego action:**
                     * For *every relevant vehicle* identified, call `Check_Trajectory_Conflict(input='ego_action,target_vehicle_id')`.
                     * **IMPORTANT:** If `Check_Trajectory_Conflict` returns a message starting with `TARGET_VEHICLE_NOT_FOUND`, it means the target vehicle has disappeared from the environment (e.g., left the road, crashed, despawned). This specific check is then **complete for that vehicle, and this result does NOT make the current ego action unsafe.** You should proceed to check other vehicles or confirm the action is safe with respect to *all other* valid vehicles.
-                    * **Safety is paramount.** If `Check_Trajectory_Conflict` indicates a `TRAJECTORY CONFLICT DETECTED` for *any* vehicle, that 'ego_action' is immediately deemed unsafe and must NOT be chosen. Discard it and move to the next prioritized action.
+                    * **Safety is paramount.** If `Check_Trajectory_Conflict` indicates a `TRAJECTORY CONFLICT_DETECTED` for *any* vehicle, that 'ego_action' is immediately deemed unsafe and must NOT be chosen. Discard it and move to the next prioritized action.
                     * **Crucial:** If an action is found to be safe with *all* relevant vehicles (and no `TRAJECTORY CONFLICT_DETECTED` messages were returned), you have found the optimal safe action. **You MUST immediately select this action and output your final decision, without checking any further lower-priority actions.**
             * **HDV Behavior Prediction:** For HDVs, assume they will follow basic traffic rules and driving habits, typically maintaining their current lane and speed (IDLE) unless a specific action is predicted for them.
         3.  **Optimal Strategy Selection:** From the remaining safe actions, select the one that best meets the efficiency and comfort objectives.
@@ -452,16 +453,16 @@ class LLMAgent:
         **General Rule on Frequent Lane Changes:** Do NOT change lanes frequently unless explicitly justified by the merging strategy or a critical safety need.
 
         **Ramp vehicles (lane {RAMP_LANE_IDX}):**
-        - **If in ramp segments ("a", "b") or ("b", "c")**: You CANNOT change lanes. You must continue straight (IDLE or adjust speed) to reach the merging zone. **This is a strict constraint.**
+        - **If in ramp segments ("a", "b") or ("b", "c")**: You CANNOT change lanes. You must continue straight (IDLE or adjust speed) to reach the merging zone. **You CANNOT accelerate.** **This is a strict constraint.**
         - **If in merging zone (ramp lane {RAMP_LANE_IDX}, segment "c", "d")**:
             - If it is safe to merge left into main lane {MERGE_MAIN_LANE_IDX} (as confirmed by tools), **PRIORITIZE LANE_LEFT**. This is your primary objective for successful merging. This is an exception to the frequent lane change rule.
-            - Else, adjust speed (FASTER/SLOWER/IDLE) to seek or create gaps, actively looking for a safe opportunity to merge.
+            - Else, adjust speed (IDLE or SLOWER) to seek or create gaps, actively looking for a safe opportunity to merge. **You CANNOT accelerate; instead, consider slowing down to wait for gaps.**
             - If at the very end of the ramp (end of segment "c", "d") with no safe gap to merge, choose SLOWER to avoid collision with the wall or main road vehicles.
 
         **Main road vehicles (lane {MAIN_LANE_INDICES[0]}-{MAIN_LANE_INDICES[1]}):**
         - **If in merging zone (main lane {MERGE_MAIN_LANE_IDX}, segment "c", "d")**:
             - If a ramp vehicle (from lane {RAMP_LANE_IDX}) needs to merge, and your left lane (lane {MAIN_LANE_INDICES[0]}) is safe and available, **CONSIDER LANE_LEFT to assist** in facilitating traffic flow for the merging vehicle. This is an exception to the frequent lane change rule.
-            - Otherwise, adjust speed (FASTER/SLOWER/IDLE) to create a reasonable gap for the ramp vehicle to merge, but avoid heavy braking that disrupts main road flow. **Prioritize maintaining current speed (IDLE) to ensure smooth flow, unless acceleration is clearly beneficial and safe.**
+            - Otherwise, adjust speed (FASTER/IDLE/SLOWER) to create a reasonable gap for the ramp vehicle to merge, but avoid heavy braking that disrupts main road flow. **Prioritize maintaining current speed (IDLE) to ensure smooth flow, unless acceleration is clearly beneficial and safe.**
         - In non-merging areas (any lane not in "c", "d" segment): drive efficiently but be prepared to facilitate merging if applicable. **Prioritize maintaining current speed (IDLE) to ensure smooth flow, unless acceleration is clearly beneficial and safe.**
 
         --- Output Format ---
@@ -476,7 +477,7 @@ class LLMAgent:
         """
         return prompt
 
-    def get_decision(self, observation: Dict[str, Any]) -> Dict[str, Any]:
+    def get_decision(self, observation: Dict[str, Any], log_file=None) -> Dict[str, Any]:
         messages = [{"role": "system", "content": self.system_prompt}]
         
         ego_vehicle_info = observation['ego_vehicle']
@@ -511,8 +512,10 @@ class LLMAgent:
                 
                 if response_message.tool_calls:
                     print(f"LLM Iter {i+1}: Calling Tools: {[tc.function.name for tc in response_message.tool_calls]}")
+                    log_file.write(f"LLM Iter {i+1}: Calling Tools: {[tc.function.name for tc in response_message.tool_calls]}\n")
                 else:
                     print(f"LLM Iter {i+1}: Text/Final: {response_message.content[:80]}...")
+                    log_file.write(f"LLM Iter {i+1}: Text/Final: {response_message.content}\n") # Log full text response
                 
                 messages.append(response_message)
                 
@@ -539,25 +542,29 @@ class LLMAgent:
                                 brief_output = tool_output_content.replace('\n', ' ').strip()
                                 if len(brief_output) > 100: brief_output = brief_output[:97] + "..."
                                 print(f"  -> Tool Output: {function_name} (input: {tool_input}): {brief_output}")
+                                log_file.write(f"  -> Tool Output: {function_name} (input: {tool_input}): {tool_output_content}\n") # Log full tool output
 
                             except json.JSONDecodeError:
                                 error_msg = f"Invalid JSON args for {function_name}."
                                 messages.append({"tool_call_id": tool_call.id, "role": "tool", "name": function_name, "content": error_msg})
                                 print(f"  -> Tool Error: {function_name} (input: {tool_input}): {error_msg}")
+                                log_file.write(f"  -> Tool Error: {function_name} (input: {tool_input}): {error_msg}\n")
                             except KeyError:
                                 error_msg = f"Missing 'input' key for {function_name}."
                                 messages.append({"tool_call_id": tool_call.id, "role": "tool", "name": function_name, "content": error_msg})
                                 print(f"  -> Tool Error: {function_name} (input: {function_args_str}): {error_msg}")
+                                log_file.write(f"  -> Tool Error: {function_name} (input: {function_args_str}): {error_msg}\n")
                             except Exception as e:
                                 error_msg = f"Error executing tool {function_name} with args {function_args_str}: {str(e)[:50]}..."
                                 messages.append({"tool_call_id": tool_call.id, "role": "tool", "name": function_name, "content": error_msg})
                                 print(f"  -> Tool Error: {function_name} (input: {function_args_str}): {error_msg}")
+                                log_file.write(f"  -> Tool Error: {function_name} (input: {function_args_str}): {error_msg}\n")
                         else:
                             error_msg = f"Error: Tool '{function_name}' not found in tools_map."
                             messages.append({"tool_call_id": tool_call.id, "role": "tool", "name": function_name, "content": error_msg})
                             print(f"  -> Tool Error: {function_name}: {error_msg}")
+                            log_file.write(f"  -> Tool Error: {function_name}: {error_msg}\n")
                 else:
-                    # LLM provided a final answer (hopefully JSON) or a text response
                     llm_output_raw = response_message.content
                     
                     json_match = re.search(r'```json\n(.*?)```', llm_output_raw, re.DOTALL)
@@ -569,26 +576,33 @@ class LLMAgent:
                     try:
                         decision = json.loads(clean_llm_output)
                         if all(k in decision for k in ["decision", "reasoning"]):
-                            print(f"LLM Final Decision: {decision['decision']} (Reasoning: {decision['reasoning']}...)")
+                            print(f"LLM Final Decision: {decision['decision']} (Reasoning: {decision['reasoning'][:50]}...)")
+                            log_file.write(f"LLM Final Decision: {json.dumps(decision, indent=2)}\n") # Log full JSON decision
                             return decision 
                         else:
                             print(f"LLM output is JSON but missing required fields. Raw: {llm_output_raw[:80]}...")
+                            log_file.write(f"LLM output is JSON but missing required fields. Raw: {llm_output_raw}\n") # Log full raw output
                             messages.append({"role": "assistant", "content": llm_output_raw})
                             continue
                     except json.JSONDecodeError:
                         print(f"LLM did not return valid JSON. Raw: {llm_output_raw[:80]}... Appending as text and continuing.")
+                        log_file.write(f"LLM did not return valid JSON. Raw: {llm_output_raw}\n") # Log full raw output
                         messages.append({"role": "assistant", "content": llm_output_raw})
                         continue
 
             except Exception as e:
                 print(f"Error during LLM interaction (outer loop): {e}")
-                return self._fallback_decision(observation, reason=f"An unexpected error occurred during LLM process: {e}")
+                log_file.write(f"Error during LLM interaction (outer loop): {e}\n")
+                return self._fallback_decision(observation, log_file,reason=f"An unexpected error occurred during LLM process: {e}")
 
         print(f"Max iterations ({max_iterations}) reached without LLM providing a valid JSON decision.")
-        return self._fallback_decision(observation, reason=f"Max tool calls ({max_iterations}) reached, no valid JSON decision.")
+        log_file.write(f"Max iterations ({max_iterations}) reached without LLM providing a valid JSON decision.\n")
+        return self._fallback_decision(observation, log_file,reason=f"Max tool calls ({max_iterations}) reached, no valid JSON decision.")
 
-    def _fallback_decision(self, observation: Dict[str, Any], reason: str = "LLM interaction failed, falling back to emergency deceleration.") -> Dict[str, Any]:
+    def _fallback_decision(self, observation: Dict[str, Any],log_file, reason: str = "LLM interaction failed, falling back to emergency deceleration.") -> Dict[str, Any]:
         print(reason)
+        # Log fallback reason fully
+        log_file.write(f"FALLBACK DECISION: {reason}\n")
         return {
             "decision": "SLOWER",
             "reasoning": reason
