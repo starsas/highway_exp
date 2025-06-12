@@ -87,7 +87,7 @@ def simulate_and_save_videos(env, llm_agent, num_steps=400, env_video_file="./ll
 
                 idx_in_controlled_vehicles = env.controlled_vehicles.index(controlled_veh_obj)
                 
-                v_rear,v_front=env.road.neighbour_vehicles(controlled_veh_obj)
+                v_front,v_rear=env.road.neighbour_vehicles(controlled_veh_obj)
                 if controlled_veh_obj.lane_index[2]!=2 and v_front==None:
                     #主道头车加速
                     llm_action_str=3
@@ -161,7 +161,7 @@ def simulate_and_save_videos(env, llm_agent, num_steps=400, env_video_file="./ll
                     'llm_decision': llm_action_str,
                     'reasoning': reasoning
                 })
-                print(f"Step: {step}, Controlled Vehicle ID: {idx_in_controlled_vehicles}, Pos: {controlled_veh_obj.lane_index}, Decision (LLM): {llm_action_str}")
+                print(f"Step: {step}, Controlled Vehicle ID: {idx_in_controlled_vehicles}, Pos: {controlled_veh_obj.lane_index}, Decision (LLM): {llm_action_str}, Reasoning: {reasoning}")
             
                 # --- CRITICAL STEP: Restore original ID ---
                 controlled_veh_obj.id = idx_in_controlled_vehicles
