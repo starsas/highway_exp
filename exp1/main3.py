@@ -92,57 +92,64 @@ def simulate_and_save_videos(env, llm_agent, num_steps=400, env_video_file="./ll
                 if controlled_veh_obj.id in processed_controlled_vehicles_ids:
                     continue
                 processed_controlled_vehicles_ids.append(controlled_veh_obj.id)
-
+                front_v,rear_v=env.road.neighbour_vehicles(controlled_veh_obj)
                 idx_in_controlled_vehicles = env.controlled_vehicles.index(controlled_veh_obj)
-
                 original_controlled_veh_id_before_ego_set = getattr(controlled_veh_obj, 'id', f"vehicle_{id(controlled_veh_obj)}")
-                
-                controlled_veh_obj.id = "ego" 
-                
-                llm_agent.scenario._update_vehicles(current_step_cav_decisions) 
-
-                # Print to console (concise) and log to file (full)
-                print(f"  --- Processing CAV: Original ID '{original_controlled_veh_id_before_ego_set}', Temporarily 'ego' ---")
-                log_file.write(f"  --- Processing CAV: Original ID '{original_controlled_veh_id_before_ego_set}', Temporarily 'ego' ---\n")
-                
-                if "ego" not in llm_agent.scenario.vehicles:
-                    error_msg = f"    ERROR: 'ego' key NOT found in llm_agent.scenario.vehicles AFTER _update_vehicles! Scenario keys: {list(llm_agent.scenario.vehicles.keys())}"
-                    print(error_msg)
-                    log_file.write(error_msg + "\n")
-                    llm_decision_output = llm_agent._fallback_decision(
-                        {'ego_vehicle': {'lane_id': controlled_veh_obj.lane_index[2] if controlled_veh_obj.lane_index else -1}},
-                        reason=f"KeyError: 'ego' in scenario.vehicles for original ID {original_controlled_veh_id_before_ego_set}"
-                    )
-                else:
-                    current_ego_mock = llm_agent.scenario.vehicles["ego"]
-                    print(f"    Found 'ego' in scenario.vehicles. Mock ID: {current_ego_mock.id}, Lane: {current_ego_mock.lane_idx}, Pos: {current_ego_mock.lanePosition:.2f}")
-                    log_file.write(f"    Found 'ego' in scenario.vehicles. Mock ID: {current_ego_mock.id}, Lane: {current_ego_mock.lane_idx}, Pos: {current_ego_mock.lanePosition:.2f}\n")
+                if controlled_veh_obj.lane_index[0]=="a":
+                    actions_for_env[idx_in_controlled_vehicles]=1
+                    reasoning="lane in a_b ,keep IDLE"
+                    llm_agent.scenario.vehicles[original_controlled_veh_id_before_ego_set].decision="IDLE"
+                elif front_v==None and controlled_veh_obj.lane_index[2]!=2:
+                    actions_for_env[idx_in_controlled_vehicles]=1
+                    reasoning="first car in lane,faster"
+                    llm_agent.scenario.vehicles[original_controlled_veh_id_before_ego_set].decision="FASTER"
+                else:      
+                    controlled_veh_obj.id = "ego" 
                     
-                    observation_for_llm = {
-                        'ego_vehicle': {
-                            'id': current_ego_mock.id,
-                            'speed': current_ego_mock.speed,
-                            'lane_id': current_ego_mock.lane_idx, 
-                            'lane_id_tuple': current_ego_mock.lane_id_tuple, 
-                            'lanePosition': current_ego_mock.lanePosition,
-                            'position_xy': controlled_veh_obj.position.tolist(),
-                            'in_merging_area': is_in_merging_area(current_ego_mock)
-                        },
-                        'road_info': {
-                            'ends': env.ends, 
-                            'num_lanes': NUM_TOTAL_LANES # Use updated total lane count
-                        },
-                        'traffic_density': env.config.get("traffic_density", "unknown")
-                    }
+                    llm_agent.scenario._update_vehicles(current_step_cav_decisions) 
 
-                    llm_decision_output = llm_agent.get_decision(observation_for_llm, log_file=log_file) # Pass log_file
+                    # Print to console (concise) and log to file (full)
+                    print(f"  --- Processing CAV: Original ID '{original_controlled_veh_id_before_ego_set}', Temporarily 'ego' ---")
+                    log_file.write(f"  --- Processing CAV: Original ID '{original_controlled_veh_id_before_ego_set}', Temporarily 'ego' ---\n")
+                    
+                    if "ego" not in llm_agent.scenario.vehicles:
+                        error_msg = f"    ERROR: 'ego' key NOT found in llm_agent.scenario.vehicles AFTER _update_vehicles! Scenario keys: {list(llm_agent.scenario.vehicles.keys())}"
+                        print(error_msg)
+                        log_file.write(error_msg + "\n")
+                        llm_decision_output = llm_agent._fallback_decision(
+                            {'ego_vehicle': {'lane_id': controlled_veh_obj.lane_index[2] if controlled_veh_obj.lane_index else -1}},
+                            reason=f"KeyError: 'ego' in scenario.vehicles for original ID {original_controlled_veh_id_before_ego_set}"
+                        )
+                    else:
+                        current_ego_mock = llm_agent.scenario.vehicles["ego"]
+                        print(f"    Found 'ego' in scenario.vehicles. Mock ID: {current_ego_mock.id}, Lane: {current_ego_mock.lane_idx}, Pos: {current_ego_mock.lanePosition:.2f}")
+                        log_file.write(f"    Found 'ego' in scenario.vehicles. Mock ID: {current_ego_mock.id}, Lane: {current_ego_mock.lane_idx}, Pos: {current_ego_mock.lanePosition:.2f}\n")
+                        
+                        observation_for_llm = {
+                            'ego_vehicle': {
+                                'id': current_ego_mock.id,
+                                'speed': current_ego_mock.speed,
+                                'lane_id': current_ego_mock.lane_idx, 
+                                'lane_id_tuple': current_ego_mock.lane_id_tuple, 
+                                'lanePosition': current_ego_mock.lanePosition,
+                                'position_xy': controlled_veh_obj.position.tolist(),
+                                'in_merging_area': is_in_merging_area(current_ego_mock)
+                            },
+                            'road_info': {
+                                'ends': env.ends, 
+                                'num_lanes': NUM_TOTAL_LANES # Use updated total lane count
+                            },
+                            'traffic_density': env.config.get("traffic_density", "unknown")
+                        }
 
-                llm_action_str = llm_decision_output.get('decision', 'IDLE')
-                reasoning = llm_decision_output.get('reasoning', 'No specific reasoning provided.')
-                
-                actions_for_env[idx_in_controlled_vehicles] = action_to_int.get(llm_action_str, 1) 
-                
-                current_step_cav_decisions[original_controlled_veh_id_before_ego_set] = llm_action_str
+                        llm_decision_output = llm_agent.get_decision(observation_for_llm, log_file=log_file) # Pass log_file
+
+                        llm_action_str = llm_decision_output.get('decision', 'IDLE')
+                        reasoning = llm_decision_output.get('reasoning', 'No specific reasoning provided.')
+                        
+                        actions_for_env[idx_in_controlled_vehicles] = action_to_int.get(llm_action_str, 1) 
+                        
+                        current_step_cav_decisions[original_controlled_veh_id_before_ego_set] = llm_action_str
 
                 writer.writerow({
                     'step': step,
@@ -154,7 +161,7 @@ def simulate_and_save_videos(env, llm_agent, num_steps=400, env_video_file="./ll
                     'reasoning': reasoning
                 })
                 # Print to console (concise) and log to file (full)
-                print(f"Step {step}: CAV '{original_controlled_veh_id_before_ego_set}' Final Decision: {llm_action_str} (Reasoning: {reasoning[:50]}...)")
+                print(f"Step {step}: CAV '{original_controlled_veh_id_before_ego_set}' Final Decision: {llm_action_str} (Reasoning: {reasoning}...)")
                 log_file.write(f"Step {step}: CAV '{original_controlled_veh_id_before_ego_set}' Final Decision: {llm_action_str}, Reasoning: {reasoning}\n")
             
                 controlled_veh_obj.id = original_controlled_veh_id_before_ego_set
@@ -173,7 +180,7 @@ def simulate_and_save_videos(env, llm_agent, num_steps=400, env_video_file="./ll
                 break
 
     print(f"\n--- Simulation Ended ---")
-    log_file.write(f"\n--- Simulation Ended ---\n")
+    # log_file.write(f"\n--- Simulation Ended ---\n")
     env_clip = ImageSequenceClip(env_frames, fps=fps)
     env_clip.write_videofile(env_video_file, codec="libx264")
     print(f"Environment video saved as {env_video_file}")
@@ -205,5 +212,5 @@ if __name__ == "__main__":
         env.close()
     except Exception as e:
         import shutil
-        shutil.rmtree(result_dir, ignore_errors=True)
+        # shutil.rmtree(result_dir, ignore_errors=True)
         raise
