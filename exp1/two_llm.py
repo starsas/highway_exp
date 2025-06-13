@@ -7,6 +7,8 @@ from typing import Any, Dict, List, Tuple, Optional
 
 # Make sure to import Road from highway_env.road.road
 from highway_env.road.road import Road 
+from highway_env.vehicle.behavior import IDMVehicle, LinearVehicle # Import relevant HDV types
+from highway_env.vehicle.controller import ControlledVehicle # Import base CAV type
 
 # --- Constants for Lane/Road Structure (Reflect the new 2 main + 1 ramp model) ---
 NUM_MAIN_LANES = 2 # Number of main lanes: lane 0, lane 1
@@ -14,7 +16,7 @@ MAIN_LANE_INDICES = [0, 1]
 RAMP_LANE_IDX = 2 # The ramp is now explicitly lane 2
 MERGE_MAIN_LANE_IDX = 1 # Main lane involved in merge is lane 1 (rightmost main lane)
 MERGE_RAMP_LANE_IDX = 2 # Ramp lane involved in merge is lane 2
-NUM_TOTAL_LANES=3
+
 # ==============================================================================
 # 1. LLM Tools related definitions and classes
 # ==============================================================================
@@ -32,7 +34,7 @@ class MockVehicle:
         self.lane_idx = vehicle.lane_index[2] if vehicle.lane_index else -1
         self.lanePosition = vehicle.position[0]
         self.original_lane_index = vehicle.lane_index
-        self.is_controlled = hasattr(vehicle, 'is_controlled') and vehicle.is_controlled
+        self.is_controlled = isinstance(vehicle, ControlledVehicle) # More robust check for controlled type
         self.decision = decision
 
 class Scenario:
@@ -104,16 +106,46 @@ ACTIONS_DESCRIPTION = {
 # --- Trajectory Prediction Constants ---
 PREDICTION_TIMESTEP = 0.5
 PREDICTION_HORIZON = 3.0
-SAFE_COLLISION_DISTANCE = 15.0 # Increased for safer prediction
-SAFE_LANE_CHANGE_DISTANCE_LONGITUDINAL = 10
+SAFE_COLLISION_DISTANCE = 15.0 # Minimum distance between centers where collision is detected in prediction
+
+# --- New Constant for Nearby Vehicle Filtering ---
 NEARBY_OBSERVATION_DISTANCE = 30.0 # [m] Max distance to observe vehicles in adjacent lanes
+
+# --- New Constants for Following Distance Pre-check (for FASTER/IDLE) ---
+MIN_FOLLOWING_DISTANCE_FASTER = 25.0 # [m] Minimum current longitudinal distance for FASTER action with front car
+MIN_FOLLOWING_DISTANCE_IDLE = 15.0 # [m] Minimum current longitudinal distance for IDLE action with front car
+
+# --- New Constant for Aggressive Lane Change Pre-check ---
+CRITICAL_LANE_CHANGE_DISTANCE_LONGITUDINAL = 15.0 # [m] If current longitudinal distance is within this, lane change is immediately unsafe
 
 
 def _predict_single_vehicle_trajectory(vehicle: 'MockVehicle', action: Optional[str], env_road: Road, env_dt: float) -> List[np.ndarray]:
     future_positions = []
     
+    # Create a deep copy of the original highway_env Vehicle object for prediction
     temp_veh = copy.deepcopy(vehicle._vehicle) 
     
+    # --- IMPORTANT: Custom prediction logic for HDV (IDMVehicle) ---
+    # If the vehicle is an HDV (IDMVehicle or LinearVehicle) and its predicted action is 'IDLE'
+    # (which is the default for HDVs), we allow its act() method to simulate its actual IDM behavior
+    # which includes reacting to a front vehicle. This makes HDV prediction more realistic.
+    # Otherwise, if it's a CAV or an HDV with a specific non-IDLE action,
+    # we simulate it as a ControlledVehicle to ensure target_speed/lane is followed.
+    if isinstance(temp_veh, (IDMVehicle, LinearVehicle)) and action == 'IDLE':
+        # Let the original HDV act() method dictate its behavior
+        # No need to convert to ControlledVehicle if it's expected to follow its own internal model.
+        pass # temp_veh remains its original type (e.g., IDMVehicle)
+    else:
+        # For CAVs, or HDVs if we want to force them to follow a specific non-IDLE action,
+        # ensure it behaves like a ControlledVehicle.
+        initial_speed = temp_veh.speed
+        initial_target_lane_index = temp_veh.lane_index
+        initial_route = temp_veh.route
+
+        temp_veh = ControlledVehicle(temp_veh.road, temp_veh.position, temp_veh.heading, initial_speed, initial_target_lane_index, initial_speed, initial_route)
+        temp_veh.target_speed = initial_speed # Ensure target speed is set to initial speed for the base case
+
+    # Apply the action for prediction (mimic ControlledVehicle.act logic for CAVs or forced behavior)
     if action == "FASTER":
         temp_veh.target_speed += temp_veh.DELTA_SPEED
     elif action == "SLOWER":
@@ -142,7 +174,7 @@ def _predict_single_vehicle_trajectory(vehicle: 'MockVehicle', action: Optional[
     num_steps_prediction = int(PREDICTION_HORIZON / env_dt) 
     
     for _ in range(num_steps_prediction):
-        temp_veh.act() 
+        temp_veh.act() # This will call the appropriate act() method (IDM or Controlled)
         temp_veh.step(env_dt) 
         temp_veh.follow_road()
         future_positions.append(temp_veh.position)
@@ -216,6 +248,14 @@ class getAvailableLanes:
         return f"The available lanes of `{vid}` are: " + " ".join(available_lanes_info)
 
 
+@prompts(name='Get_All_Nearby_Vehicles_Info',
+             description=f"""Observes and returns a list of dictionaries about all nearby vehicles. Each dictionary contains:
+             'id': Vehicle ID (int or str)
+             'type': 'CAV' or 'HDV'
+             'lane_id': Lane ID (e.g., 'lane_0', 'lane_1', 'lane_2')
+             'distance_from_ego': Distance to ego (positive for front, negative for rear).
+             For the current lane, only the single closest vehicle in front and behind are included.
+             For left/right adjacent lanes (if they exist), vehicles within {NEARBY_OBSERVATION_DISTANCE}m front/rear of ego are included.""")
 class Get_All_Nearby_Vehicles_Info:
     def __init__(self, scenario_instance: Scenario) -> None:
         self.scenario = scenario_instance
@@ -232,12 +272,15 @@ class Get_All_Nearby_Vehicles_Info:
 
         current_lane_idx = ego_mock_vehicle.lane_idx
         current_lane_tuple = ego_mock_vehicle.lane_id_tuple 
+        
         all_nearby_info_structured = {
             "current_lane": {"lane_id": f"lane_{current_lane_idx}", "front": [], "rear": []},
             "left_lane": {"lane_id": None, "front": [], "rear": []}, 
             "right_lane": {"lane_id": None, "front": [], "rear": []}
         }
+        
         side_lane_tuples = self.network.side_lanes(current_lane_tuple) 
+        
         relevant_lane_indices_map = {current_lane_idx: "current_lane"} 
         for sl_tuple in side_lane_tuples:
             side_idx = sl_tuple[2]
@@ -247,12 +290,10 @@ class Get_All_Nearby_Vehicles_Info:
             elif side_idx > current_lane_idx: # Right lane
                 relevant_lane_indices_map[side_idx] = "right_lane"
                 all_nearby_info_structured["right_lane"] = {"lane_id": f"lane_{side_idx}", "front": [], "rear": []}
-
-        # 用于本车道前后最近车辆的筛选
-        min_front_dist = float('inf')
-        min_rear_dist = float('inf')
-        nearest_front = None
-        nearest_rear = None
+        
+        # Temporary lists to find closest front/rear in current lane
+        current_lane_front_candidates = []
+        current_lane_rear_candidates = []
 
         for v_id, v_mock in self.scenario.vehicles.items():
             if v_id == ego_mock_vehicle.id:
@@ -260,7 +301,9 @@ class Get_All_Nearby_Vehicles_Info:
 
             if v_mock.lane_idx in relevant_lane_indices_map and \
                self.network.is_connected_road(ego_mock_vehicle.original_lane_index, v_mock.original_lane_index, depth=1):
+                
                 distance_from_ego = v_mock.lanePosition - ego_mock_vehicle.lanePosition
+                
                 veh_detail = {
                     "id": v_mock.id,
                     "type": "CAV" if v_mock.is_controlled else "HDV",
@@ -269,33 +312,36 @@ class Get_All_Nearby_Vehicles_Info:
                     "lane_id": f"lane_{v_mock.lane_idx}", # Specific lane_id of this vehicle
                     "current_decision_of_CAV": v_mock.decision if v_mock.is_controlled and v_mock.decision else "None" # Decision of other CAVs
                 }
+
                 lane_key = relevant_lane_indices_map[v_mock.lane_idx]
+                
                 if lane_key == "current_lane":
-                    # 只记录最近的前车和最近的后车
-                    if distance_from_ego > 0 and distance_from_ego < min_front_dist:
-                        min_front_dist = distance_from_ego
-                        nearest_front = veh_detail
-                    elif distance_from_ego < 0 and abs(distance_from_ego) < min_rear_dist:
-                        min_rear_dist = abs(distance_from_ego)
-                        nearest_rear = veh_detail
+                    # Only single closest front/rear for current lane
+                    if distance_from_ego > 0: current_lane_front_candidates.append(veh_detail)
+                    else: current_lane_rear_candidates.append(veh_detail)
                 else: # For left_lane or right_lane
-                    # Only add vehicles within NEARBY_OBSERVATION_DISTANCE
                     if abs(distance_from_ego) <= NEARBY_OBSERVATION_DISTANCE:
                         if distance_from_ego > 0: all_nearby_info_structured[lane_key]["front"].append(veh_detail)
                         else: all_nearby_info_structured[lane_key]["rear"].append(veh_detail)
-        # 填充本车道最近前后车
-        if nearest_front:
-            all_nearby_info_structured["current_lane"]["front"].append(nearest_front)
-        if nearest_rear:
-            all_nearby_info_structured["current_lane"]["rear"].append(nearest_rear)
+        
+        # Process current lane: add only closest front and rear
+        if current_lane_front_candidates:
+            current_lane_front_candidates.sort(key=lambda x: x["distance_from_ego"])
+            all_nearby_info_structured["current_lane"]["front"].append(current_lane_front_candidates[0])
+        if current_lane_rear_candidates:
+            current_lane_rear_candidates.sort(key=lambda x: -x["distance_from_ego"]) # Closest (smallest abs dist) first
+            all_nearby_info_structured["current_lane"]["rear"].append(current_lane_rear_candidates[0])
 
+        # Sort all collected vehicles for consistent output (e.g., by lane_id then by distance_from_ego)
         for lane_key in ["current_lane", "left_lane", "right_lane"]:
             if all_nearby_info_structured[lane_key] and isinstance(all_nearby_info_structured[lane_key], dict):
                 all_nearby_info_structured[lane_key]["front"].sort(key=lambda x: x["distance_from_ego"])
                 all_nearby_info_structured[lane_key]["rear"].sort(key=lambda x: -x["distance_from_ego"])
             elif all_nearby_info_structured[lane_key] is not None and all_nearby_info_structured[lane_key]["lane_id"] is None:
-                all_nearby_info_structured[lane_key] = "Lane does not exist relative to ego or is not reachable."
+                 all_nearby_info_structured[lane_key] = "Lane does not exist relative to ego or is not reachable."
+        
         return json.dumps(all_nearby_info_structured, indent=2)
+
 
 @prompts(name='Check_Trajectory_Conflict',
              description="""Checks if the ego vehicle's planned action trajectory conflicts with a target vehicle's predicted trajectory.
@@ -328,16 +374,35 @@ class CheckTrajectoryConflict:
         if target_mock_vehicle is None:
             return f"TARGET_VEHICLE_NOT_FOUND: Vehicle '{target_vid_str}' was not found in the current environment. This might mean it despawned or crashed. Consider it safe if your action was based on its presence, or re-evaluate your plan if its absence changes critical factors."
         
-        # --- NEW PRE-CHECK FOR LANE CHANGES ---
+        # --- NEW PRE-CHECK FOR LANE CHANGES AND FOLLOWING DISTANCE ---
+        longitudinal_distance = target_mock_vehicle.lanePosition - ego_mock_vehicle.lanePosition
+        
+        # Determine if target_mock_vehicle is a front vehicle or rear vehicle
+        is_front_vehicle = longitudinal_distance > 0
+        
         if ego_action_str in ['LANE_LEFT', 'LANE_RIGHT']:
-            longitudinal_distance = target_mock_vehicle.lanePosition - ego_mock_vehicle.lanePosition
-            
-            # If target vehicle is in front AND too close OR target vehicle is behind AND too close
-            if (longitudinal_distance > 0 and longitudinal_distance < SAFE_LANE_CHANGE_DISTANCE_LONGITUDINAL) or \
-               (longitudinal_distance < 0 and abs(longitudinal_distance) < SAFE_LANE_CHANGE_DISTANCE_LONGITUDINAL * 0.7):
-                return (f"LANE_CHANGE_PRECHECK_UNSAFE: Action {ego_action_str} would put ego too close "
-                        f"to {target_vid_str} (dist: {longitudinal_distance:.2f}m) in target lane. "
-                        f"Longitudinal distance less than {SAFE_LANE_CHANGE_DISTANCE_LONGITUDINAL}m. Action {ego_action_str} is UNSAFE.")
+            # Lane Change Pre-check (applies to target lane, not current lane)
+            # This check is more about if there's enough space to even begin the maneuver
+            if is_front_vehicle: # If checking front vehicle in target lane
+                if longitudinal_distance < SAFE_LANE_CHANGE_DISTANCE_LONGITUDINAL:
+                    return (f"LANE_CHANGE_PRECHECK_UNSAFE: Action {ego_action_str} would put ego too close "
+                            f"to front vehicle {target_vid_str} (dist: {longitudinal_distance:.2f}m) in target lane. "
+                            f"Longitudinal distance less than {SAFE_LANE_CHANGE_DISTANCE_LONGITUDINAL}m. Action {ego_action_str} is UNSAFE.")
+            else: # If checking rear vehicle in target lane
+                if abs(longitudinal_distance) < SAFE_LANE_CHANGE_DISTANCE_LONGITUDINAL * 0.7: # Rear buffer can be slightly less strict
+                    return (f"LANE_CHANGE_PRECHECK_UNSAFE: Action {ego_action_str} would cut off "
+                            f"rear vehicle {target_vid_str} (dist: {abs(longitudinal_distance):.2f}m) in target lane. "
+                            f"Longitudinal distance less than {SAFE_LANE_CHANGE_DISTANCE_LONGITUDINAL * 0.7:.2f}m. Action {ego_action_str} is UNSAFE.")
+        elif ego_action_str == 'FASTER':
+            # FASTER action pre-check: If front vehicle is too close, accelerating is unsafe.
+            if is_front_vehicle and longitudinal_distance < MIN_FOLLOWING_DISTANCE_FASTER:
+                 return (f"FOLLOWING_PRECHECK_UNSAFE: Action {ego_action_str} with {target_vid_str} (dist: {longitudinal_distance:.2f}m) is unsafe. "
+                         f"Current front distance is less than {MIN_FOLLOWING_DISTANCE_FASTER}m. Action {ego_action_str} is UNSAFE.")
+        elif ego_action_str == 'IDLE':
+            # IDLE action pre-check: If front vehicle is too close, maintaining speed might be unsafe.
+            if is_front_vehicle and longitudinal_distance < MIN_FOLLOWING_DISTANCE_IDLE:
+                 return (f"FOLLOWING_PRECHECK_UNSAFE: Action {ego_action_str} with {target_vid_str} (dist: {longitudinal_distance:.2f}m) is unsafe. "
+                         f"Current front distance is less than {MIN_FOLLOWING_DISTANCE_IDLE}m. Action {ego_action_str} is UNSAFE.")
         # --- END NEW PRE-CHECK ---
 
         ego_trajectory = _predict_single_vehicle_trajectory(
@@ -359,6 +424,13 @@ class CheckTrajectoryConflict:
             dist = np.linalg.norm(ego_trajectory[i] - target_trajectory[i])
             if dist < min_distance:
                 min_distance = dist
+            # Adjust collision condition for FASTER action, to be more conservative
+            if ego_action_str == 'FASTER':
+                # If accelerating, be more strict: check against 1.5 * SAFE_COLLISION_DISTANCE
+                if dist < SAFE_COLLISION_DISTANCE * 1.5: # Example: 15m * 1.5 = 22.5m
+                    collision_detected = True
+                    break
+            # General collision check
             if dist < SAFE_COLLISION_DISTANCE:
                 collision_detected = True
                 break
@@ -442,17 +514,17 @@ class LLMAgent:
                 * **Determine Ego's Current Status (Ramp/Main, Merging Zone):** Explicitly recognize if you are a Ramp Vehicle (lane {RAMP_LANE_IDX}) or Main Road Vehicle (lane {MAIN_LANE_INDICES[0]}/{MAIN_LANE_INDICES[1]}), and if you are in the merging zone.
                 * **Prioritize ego actions to evaluate based on your current status and merging strategy:**
                     * **General Rule on Frequent Lane Changes:** Do NOT change lanes frequently unless explicitly justified by the merging strategy or a critical safety need. This means `IDLE` or `FASTER` (to maintain speed) are often higher priority in non-critical situations.
-                    * **Acceleration Rule:** Unless you are the very first vehicle on a main lane (no front vehicle in your lane) AND there is a ramp vehicle in your right-rear side lane that needs to merge, try to avoid accelerating. Focus on maintaining current speed (IDLE).
+                    * **Acceleration Rule:** Unless you are the very first vehicle on a main lane (no front vehicle in your lane) AND there is a ramp vehicle in your right-rear side lane that needs to merge, try to avoid accelerating. Focus on maintaining current speed (IDLE). **If `FASTER` is considered, also verify that current distance to any front vehicle in your lane is at least {MIN_FOLLOWING_DISTANCE_FASTER}m.**
                     * **Prioritization by Vehicle Role/Location:**
                         * If you are a **Ramp Vehicle (lane {RAMP_LANE_IDX}) AND in the merging zone (segment "c","d")**: Prioritize `LANE_LEFT` (if available and safe, as per merging strategy). Then consider `IDLE`, `SLOWER`. **You CANNOT accelerate.**
                         * If you are a **Ramp Vehicle (lane {RAMP_LANE_IDX}) AND NOT in the merging zone (e.g., in "a","b" or "b","c" segments)**: You CANNOT change lanes. Your only available actions are `IDLE`, `SLOWER`. **You CANNOT accelerate.** Prioritize `IDLE`.
-                        * If you are a **Main Road Vehicle (lane {MERGE_MAIN_LANE_IDX}) AND in the merging zone (segment "c","d")**: Prioritize `IDLE` or `FASTER` (if no front vehicle). **If a ramp vehicle needs to merge from your right, prioritize `LANE_LEFT` (if safe and available) to yield.** Then `SLOWER`.
+                        * If you are a **Main Road Vehicle (lane {MERGE_MAIN_LANE_IDX}) AND in the merging zone (segment "c","d")**: Prioritize `IDLE` or `FASTER` (if no front vehicle and safe). **If a ramp vehicle needs to merge from your right, prioritize `LANE_LEFT` (if safe and available) to yield.** Then `SLOWER`.
                         * If you are a **Main Road Vehicle (lane {MAIN_LANE_INDICES[0]}) or not in the merging zone**: Prioritize `IDLE` or `FASTER` to maintain efficiency. Then `LANE_LEFT`, `LANE_RIGHT`, `SLOWER`.
                 * **For each prioritized ego action:**
                     * For *every relevant vehicle* identified, call `Check_Trajectory_Conflict(input='ego_action,target_vehicle_id')`.
                     * **IMPORTANT:** If `Check_Trajectory_Conflict` returns a message starting with `TARGET_VEHICLE_NOT_FOUND`, it means the target vehicle has disappeared from the environment (e.g., left the road, crashed, despawned). This specific check is then **complete for that vehicle, and this result does NOT make the current ego action unsafe.** You should proceed to check other vehicles or confirm the action is safe with respect to *all other* valid vehicles.
-                    * **Safety is paramount.** If `Check_Trajectory_Conflict` indicates a `TRAJECTORY CONFLICT_DETECTED` or `LANE_CHANGE_PRECHECK_UNSAFE` for *any* vehicle, that 'ego_action' is immediately deemed unsafe and must NOT be chosen. Discard it and move to the next prioritized action.
-                    * **Crucial:** If an action is found to be safe with *all* relevant vehicles (and no `TRAJECTORY CONFLICT_DETECTED` or `LANE_CHANGE_PRECHECK_UNSAFE` messages were returned), you have found the optimal safe action. **You MUST immediately select this action and output your final decision, without checking any further lower-priority actions.**
+                    * **Safety is paramount.** If `Check_Trajectory_Conflict` indicates a `TRAJECTORY CONFLICT_DETECTED` or `LANE_CHANGE_PRECHECK_UNSAFE` or `FOLLOWING_PRECHECK_UNSAFE` for *any* vehicle, that 'ego_action' is immediately deemed unsafe and must NOT be chosen. Discard it and move to the next prioritized action.
+                    * **Crucial:** If an action is found to be safe with *all* relevant vehicles (and no `TRAJECTORY CONFLICT_DETECTED`, `LANE_CHANGE_PRECHECK_UNSAFE`, or `FOLLOWING_PRECHECK_UNSAFE` messages were returned), you have found the optimal safe action. **You MUST immediately select this action and output your final decision, without checking any further lower-priority actions.**
             * **HDV Behavior Prediction:** For HDVs, assume they will follow basic traffic rules and driving habits, typically maintaining their current lane and speed (IDLE) unless a specific action is predicted for them.
         3.  **Optimal Strategy Selection:** From the remaining safe actions, select the one that best meets the efficiency and comfort objectives.
 
@@ -525,7 +597,7 @@ class LLMAgent:
                     log_file.write(f"LLM Iter {i+1}: Calling Tools: {[tc.function.name for tc in response_message.tool_calls]}\n")
                 else:
                     print(f"LLM Iter {i+1}: Text/Final: {response_message.content[:80]}...")
-                    log_file.write(f"LLM Iter {i+1}: Text/Final: {response_message.content}\n") # Log full text response
+                    log_file.write(f"LLM Iter {i+1}: Text/Final: {response_message.content}\n") 
                 
                 messages.append(response_message)
                 
@@ -548,11 +620,10 @@ class LLMAgent:
                                     "name": function_name,
                                     "content": tool_output_content,
                                 })
-                                # Concise print for tool output
                                 brief_output = tool_output_content.replace('\n', ' ').strip()
                                 if len(brief_output) > 100: brief_output = brief_output[:97] + "..."
                                 print(f"  -> Tool Output: {function_name} (input: {tool_input}): {brief_output}")
-                                log_file.write(f"  -> Tool Output: {function_name} (input: {tool_input}): {tool_output_content}\n") # Log full tool output
+                                log_file.write(f"  -> Tool Output: {function_name} (input: {tool_input}): {tool_output_content}\n") 
 
                             except json.JSONDecodeError:
                                 error_msg = f"Invalid JSON args for {function_name}."
@@ -586,7 +657,7 @@ class LLMAgent:
                     try:
                         decision = json.loads(clean_llm_output)
                         if all(k in decision for k in ["decision", "reasoning"]):
-                            # print(f"LLM Final Decision: {decision['decision']} (Reasoning: {decision['reasoning'][:50]}...)")
+                            print(f"LLM Final Decision: {decision['decision']} (Reasoning: {decision['reasoning'][:50]}...)")
                             log_file.write(f"LLM Final Decision: {json.dumps(decision, indent=2)}\n") 
                             return decision 
                         else:
