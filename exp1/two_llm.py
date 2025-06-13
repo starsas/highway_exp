@@ -16,7 +16,7 @@ MAIN_LANE_INDICES = [0, 1]
 RAMP_LANE_IDX = 2 # The ramp is now explicitly lane 2
 MERGE_MAIN_LANE_IDX = 1 # Main lane involved in merge is lane 1 (rightmost main lane)
 MERGE_RAMP_LANE_IDX = 2 # Ramp lane involved in merge is lane 2
-
+NUM_TOTAL_LANES = 3
 # ==============================================================================
 # 1. LLM Tools related definitions and classes
 # ==============================================================================
@@ -110,7 +110,7 @@ SAFE_COLLISION_DISTANCE = 15.0 # Minimum distance between centers where collisio
 
 # --- New Constant for Nearby Vehicle Filtering ---
 NEARBY_OBSERVATION_DISTANCE = 30.0 # [m] Max distance to observe vehicles in adjacent lanes
-
+SAFE_LANE_CHANGE_DISTANCE_LONGITUDINAL = 15
 # --- New Constants for Following Distance Pre-check (for FASTER/IDLE) ---
 MIN_FOLLOWING_DISTANCE_FASTER = 25.0 # [m] Minimum current longitudinal distance for FASTER action with front car
 MIN_FOLLOWING_DISTANCE_IDLE = 15.0 # [m] Minimum current longitudinal distance for IDLE action with front car
