@@ -86,6 +86,8 @@ class IDMVehicle(ControlledVehicle):
         front_vehicle, rear_vehicle = self.road.neighbour_vehicles(self)
         # Lateral: MOBIL
         self.follow_road()
+        if self.lane_index == ("b","c",2) and self.target_lane_index == ("b","c",1):
+            self.enable_lane_change=False
         if self.enable_lane_change:
             self.change_lane_policy()
         action['steering'] = self.steering_control(self.target_lane_index)
