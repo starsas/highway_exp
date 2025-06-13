@@ -97,12 +97,14 @@ def simulate_and_save_videos(env, llm_agent, num_steps=400, env_video_file="./ll
                 original_controlled_veh_id_before_ego_set = getattr(controlled_veh_obj, 'id', f"vehicle_{id(controlled_veh_obj)}")
                 if controlled_veh_obj.lane_index[0]=="a":
                     actions_for_env[idx_in_controlled_vehicles]=1
+                    llm_action_str="IDLE"
                     reasoning="lane in a_b ,keep IDLE"
-                    llm_agent.scenario.vehicles[original_controlled_veh_id_before_ego_set].decision="IDLE"
+                    llm_agent.scenario.vehicles[original_controlled_veh_id_before_ego_set].decision=llm_action_str
                 elif front_v==None and controlled_veh_obj.lane_index[2]!=2:
-                    actions_for_env[idx_in_controlled_vehicles]=1
+                    actions_for_env[idx_in_controlled_vehicles]=3
+                    llm_action_str="FASTER"
                     reasoning="first car in lane,faster"
-                    llm_agent.scenario.vehicles[original_controlled_veh_id_before_ego_set].decision="FASTER"
+                    llm_agent.scenario.vehicles[original_controlled_veh_id_before_ego_set].decision=llm_action_str
                 else:      
                     controlled_veh_obj.id = "ego" 
                     
